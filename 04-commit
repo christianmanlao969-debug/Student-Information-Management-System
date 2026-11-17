@@ -1,0 +1,79 @@
+## Commit 4: `feat(server): add User model, password hashing and auth middleware`
+
+**What this adds:** Adds the User collection (name, email, password, role). Passwords are hashed with bcrypt before saving. The middleware checks the login token and the role (admin or staff).
+
+**Step 1 - make the folders:**
+
+```
+mkdir server\models
+mkdir server\middleware
+```
+
+**Step 2 - create these files and paste the code:**
+
+
+### `server/models/User.js`
+
+````js
+const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
+
+const schema = new mongoose.Schema({
+  name: { type: String, required: [true, 'Name is required'], trim: true },
+  email: {
+    type: String, required: [true, 'Email is required'], unique: true, lowercase: true, trim: true,
+    match: [/^\S+@\S+\.\S+$/, 'Enter a valid email address']
+  },
+  password: {
+    type: String, required: [true, 'Password is required'],
+    minlength: [6, 'Password must be at least 6 characters'], select: false
+  },
+  role: { type: String, enum: ['admin', 'staff'], default: 'staff' }
+}, { timestamps: true });
+
+// Hash the password before saving (never store plain passwords)
+schema.pre('save', async function () {
+  if (this.isModified('password')) this.password = await bcrypt.hash(this.password, 10);
+});
+schema.methods.matchPassword = function (plain) { return bcrypt.compare(plain, this.password); };
+
+module.exports = mongoose.model('User', schema);
+````
+
+
+### `server/middleware/auth.js`
+
+````js
+const jwt = require('jsonwebtoken');
+const User = require('../models/User');
+
+// protect: only logged-in users can pass
+exports.protect = async (req, res, next) => {
+  try {
+    const header = req.headers.authorization || '';
+    if (!header.startsWith('Bearer ')) return res.status(401).json({ message: 'You are not logged in' });
+    const decoded = jwt.verify(header.split(' ')[1], process.env.JWT_SECRET);
+    const user = await User.findById(decoded.id);
+    if (!user) return res.status(401).json({ message: 'User no longer exists' });
+    req.user = user;
+    next();
+  } catch (e) {
+    res.status(401).json({ message: 'Session expired. Please log in again.' });
+  }
+};
+
+// requireRole: only certain roles (example: admin) can pass
+exports.requireRole = (...roles) => (req, res, next) =>
+  roles.includes(req.user.role)
+    ? next()
+    : res.status(403).json({ message: 'You do not have permission to do this' });
+````
+
+**Step 3 - add and commit:**
+
+```
+git add server/models/User.js server/middleware/auth.js
+git commit -m "feat(server): add User model, password hashing and auth middleware"
+```
+
+---
