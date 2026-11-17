@@ -1,0 +1,76 @@
+## Commit 2: `chore(server): initialize backend package and env example`
+
+**What this adds:** Creates the backend folder with its package list (Express, Mongoose, bcrypt, JWT, multer), a sample settings file, and a gitignore so secrets and uploaded photos are not pushed.
+
+**Step 1 - make the folders:**
+
+```
+mkdir server
+mkdir server\uploads
+```
+
+**Step 2 - create these files and paste the code:**
+
+
+### `server/package.json`
+
+````json
+{
+  "name": "sims-server",
+  "version": "1.0.0",
+  "description": "Student Information Management System - Backend",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "seed": "node seed.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.4.0",
+    "multer": "^1.4.5-lts.1"
+  }
+}
+````
+
+
+### `server/.env.example`
+
+````
+PORT=5000
+MONGO_URI=mongodb://127.0.0.1:27017/student_management_system
+JWT_SECRET=change_this_to_any_long_random_text
+````
+
+
+### `server/.gitignore`
+
+````
+node_modules
+.env
+uploads/*
+!uploads/.gitkeep
+````
+
+
+### `server/uploads/.gitkeep`
+
+This file is empty. Create it with:
+
+```
+type nul > server\uploads\.gitkeep
+```
+(PowerShell: `New-Item server/uploads/.gitkeep -ItemType File`)
+
+**Step 3 - add and commit:**
+
+```
+git add server/package.json server/.env.example server/.gitignore server/uploads/.gitkeep
+git commit -m "chore(server): initialize backend package and env example"
+```
+
+---
