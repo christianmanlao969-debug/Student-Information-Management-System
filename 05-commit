@@ -1,0 +1,52 @@
+## Commit 5: `feat(server): add Course, Section and Subject models`
+
+**What this adds:** Adds three collections. Sections and Subjects point to a Course using an ObjectId reference.
+
+**Step 2 - create these files and paste the code:**
+
+
+### `server/models/Course.js`
+
+````js
+const mongoose = require('mongoose');
+module.exports = mongoose.model('Course', new mongoose.Schema({
+  code: { type: String, required: [true, 'Course code is required'], unique: true, uppercase: true, trim: true },
+  name: { type: String, required: [true, 'Course name is required'], trim: true },
+  description: { type: String, trim: true }
+}, { timestamps: true }));
+````
+
+
+### `server/models/Section.js`
+
+````js
+const mongoose = require('mongoose');
+module.exports = mongoose.model('Section', new mongoose.Schema({
+  name: { type: String, required: [true, 'Section name is required'], trim: true },
+  gradeLevel: { type: String, required: [true, 'Grade level is required'] },
+  course: { type: mongoose.Schema.Types.ObjectId, ref: 'Course' },
+  adviser: { type: String, trim: true }
+}, { timestamps: true }));
+````
+
+
+### `server/models/Subject.js`
+
+````js
+const mongoose = require('mongoose');
+module.exports = mongoose.model('Subject', new mongoose.Schema({
+  code: { type: String, required: [true, 'Subject code is required'], unique: true, uppercase: true, trim: true },
+  name: { type: String, required: [true, 'Subject name is required'], trim: true },
+  units: { type: Number, min: [1, 'Units must be at least 1'], max: [6, 'Units cannot be more than 6'], default: 1 },
+  course: { type: mongoose.Schema.Types.ObjectId, ref: 'Course' }
+}, { timestamps: true }));
+````
+
+**Step 3 - add and commit:**
+
+```
+git add server/models/Course.js server/models/Section.js server/models/Subject.js
+git commit -m "feat(server): add Course, Section and Subject models"
+```
+
+---
