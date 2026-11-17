@@ -1,0 +1,126 @@
+## Commit 1
+
+### `README.md`
+
+````markdown
+# Student Information Management System (SIMS)
+
+A web app for school administrators to manage students, enrollment, courses, sections, subjects, grades and reports.
+
+**Stack:** React (Vite) + plain CSS, Node.js + Express, MongoDB (Mongoose), Lucide React icons.
+
+## 1. Folder structure
+
+```
+sims/
+├── server/                  <- Backend (Node + Express)
+│   ├── config/db.js         Connects to MongoDB
+│   ├── middleware/auth.js   Login check (JWT) and role check (admin/staff)
+│   ├── models/              Database shapes: User, Student, Course, Section,
+│   │                        Subject, Grade, Enrollment
+│   ├── routes/              API endpoints (one file per collection + dashboard + auth)
+│   ├── utils/crud.js        Reusable Create/Read/Update/Delete route builder
+│   ├── uploads/             Student profile pictures are saved here
+│   ├── seed.js              Adds sample data for testing
+│   ├── server.js            Starts the server
+│   └── .env                 Settings (port, database address, secret key)
+└── client/                  <- Frontend (React)
+    └── src/
+        ├── api.js           Axios setup (adds the login token automatically)
+        ├── context.jsx      Login state + success/error notifications
+        ├── App.jsx          Page routes + protected pages
+        ├── components/      Layout (sidebar), Modal/Confirm dialog, CrudPage
+        └── pages/           Login, Dashboard, Students, Reports, SimplePages
+```
+
+## 2. What you need first
+
+1. **Node.js LTS** (version 18 or newer): https://nodejs.org  — check with `node -v`
+2. **MongoDB Community Server**: https://www.mongodb.com/try/download/community
+   (during install, keep "Run as a Service" checked so MongoDB starts automatically)
+3. **MongoDB Compass** (the visual database tool; it is included in the MongoDB installer)
+4. **VS Code**: https://code.visualstudio.com
+
+## 3. How to run (VS Code + PowerShell/CMD)
+
+You need **two terminals**: one for the backend and one for the frontend.
+
+1. Open VS Code → **File → Open Folder** → choose the `sims` folder.
+2. Open a terminal: **Terminal → New Terminal**.
+
+**Terminal 1 – Backend**
+```
+cd server
+npm install
+npm run seed
+npm run dev
+```
+- `npm install` downloads the backend libraries.
+- `npm run seed` fills the database with sample data (run it only once, or whenever you want to reset the data).
+- `npm run dev` starts the API at http://localhost:5000. You should see `MongoDB connected: student_management_system`.
+
+**Terminal 2 – Frontend** (click the **+** in the terminal panel to open a new one)
+```
+cd client
+npm install
+npm run dev
+```
+Open **http://localhost:5173** in your browser.
+
+## 4. Login accounts (created by the seed)
+
+| Role  | Email             | Password  |
+|-------|-------------------|-----------|
+| Admin | admin@school.com  | admin123  |
+| Staff | staff@school.com  | staff123  |
+
+- **Admin** can do everything, including deleting records and managing users.
+- **Staff** can add, view and edit records but **cannot delete** and cannot see the Users page.
+
+## 5. See the data in MongoDB Compass
+
+1. Open Compass → click **Connect** with `mongodb://127.0.0.1:27017`.
+2. Open the database `student_management_system`.
+3. You will see the collections: `students`, `users`, `courses`, `sections`, `subjects`, `grades`, `enrollments`.
+
+(The database and collections are created automatically by the app and the seed script.)
+
+## 6. How the system works (simple explanation)
+
+1. **Models** (`server/models`) describe what each record looks like and the validation rules
+   (example: a student must have a valid email; a grade must be 0–100).
+2. **Relationships** use MongoDB ObjectId references: a Student points to a Course and a Section;
+   an Enrollment points to a Student; a Grade points to a Student and a Subject.
+3. **Routes** (`server/routes`) are the API. `utils/crud.js` builds the 4 CRUD operations so the same
+   clean code is reused for courses, sections, subjects, grades, enrollments and users.
+   Students have their own route because they also upload a profile picture.
+4. **Login**: the password is hashed with bcrypt. After login the server gives a JWT token; the frontend
+   sends it with every request. Without a valid token the API answers "401 not logged in".
+5. **Frontend**: `CrudPage.jsx` draws the table, search box, filters, add/edit form, validation and delete
+   confirmation. Each page only gives it a short configuration.
+6. **Dashboard** numbers come from live database counts (`server/routes/dashboard.js`), not fake data.
+7. **Enrollment**: saving the newest enrollment of a student updates the student's status, course and section.
+   Older enrollments stay as the student's **enrollment history**.
+8. **Reports**: choose a report tab, filter it, then press **Print report** (use "Save as PDF" in the print window if needed).
+
+## 7. Common problems
+
+| Problem | Fix |
+|---|---|
+| `MongoDB connection failed` | Start MongoDB: Windows key → "Services" → start **MongoDB Server**. |
+| `'npm' is not recognized` | Install Node.js, then close and reopen VS Code. |
+| Page shows "Cannot connect to the server" | Make sure Terminal 1 (backend) is still running. |
+| Login says incorrect password | Run `npm run seed` in the `server` folder again. |
+| Port 5000 already used | Change `PORT` in `server/.env` **and** the proxy address in `client/vite.config.js`. |
+
+## 8. API summary
+
+`POST /api/auth/login`, `GET /api/auth/me`, `GET /api/dashboard`,
+and for `students`, `enrollments`, `courses`, `sections`, `subjects`, `grades`, `users`:
+`GET /api/<name>` (supports `?q=` search and field filters), `GET /:id`, `POST`, `PUT /:id`, `DELETE /:id` (admin only).
+````
+
+```
+git add README.md
+git commit -m "docs: add project README with setup instructions"
+```
