@@ -1,0 +1,54 @@
+## Commit 7: `feat(server): add Enrollment and Grade models`
+
+**What this adds:** Adds enrollment records (history per school year and semester) and grade records. A grade of 75 or more is marked Passed. Duplicates are blocked with unique indexes.
+
+**Step 2 - create these files and paste the code:**
+
+
+### `server/models/Enrollment.js`
+
+````js
+const mongoose = require('mongoose');
+const { ObjectId } = mongoose.Schema.Types;
+const schema = new mongoose.Schema({
+  student: { type: ObjectId, ref: 'Student', required: [true, 'Student is required'] },
+  course: { type: ObjectId, ref: 'Course' },
+  section: { type: ObjectId, ref: 'Section' },
+  schoolYear: { type: String, required: [true, 'School year is required'], match: [/^\d{4}-\d{4}$/, 'School year must look like 2026-2027'] },
+  semester: { type: String, enum: ['1st Semester', '2nd Semester', 'Summer'], required: [true, 'Semester is required'] },
+  status: { type: String, enum: ['Pending', 'Enrolled', 'Dropped', 'Graduated'], default: 'Enrolled' },
+  remarks: { type: String, trim: true }
+}, { timestamps: true });
+// A student can only have one record per school year + semester
+schema.index({ student: 1, schoolYear: 1, semester: 1 }, { unique: true });
+module.exports = mongoose.model('Enrollment', schema);
+````
+
+
+### `server/models/Grade.js`
+
+````js
+const mongoose = require('mongoose');
+const { ObjectId } = mongoose.Schema.Types;
+const schema = new mongoose.Schema({
+  student: { type: ObjectId, ref: 'Student', required: [true, 'Student is required'] },
+  subject: { type: ObjectId, ref: 'Subject', required: [true, 'Subject is required'] },
+  schoolYear: { type: String, required: [true, 'School year is required'], match: [/^\d{4}-\d{4}$/, 'School year must look like 2026-2027'] },
+  semester: { type: String, enum: ['1st Semester', '2nd Semester', 'Summer'], required: [true, 'Semester is required'] },
+  grade: { type: Number, required: [true, 'Grade is required'], min: [0, 'Grade cannot be below 0'], max: [100, 'Grade cannot be above 100'] },
+  remarks: String
+}, { timestamps: true });
+schema.index({ student: 1, subject: 1, schoolYear: 1, semester: 1 }, { unique: true });
+// Passing grade is 75
+schema.pre('validate', function () { if (this.grade != null) this.remarks = this.grade >= 75 ? 'Passed' : 'Failed'; });
+module.exports = mongoose.model('Grade', schema);
+````
+
+**Step 3 - add and commit:**
+
+```
+git add server/models/Enrollment.js server/models/Grade.js
+git commit -m "feat(server): add Enrollment and Grade models"
+```
+
+---
