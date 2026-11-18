@@ -1,0 +1,61 @@
+## Commit 6: `feat(server): add Student model with validation and auto student ID`
+
+**What this adds:** Adds the Student collection with every field from the project requirements. It validates email, phone numbers and birth date, and creates an ID like 2026-0001 when none is given.
+
+**Step 2 - create these files and paste the code:**
+
+
+### `server/models/Student.js`
+
+````js
+const mongoose = require('mongoose');
+const phone = [/^[0-9+\-\s()]{7,15}$/, 'Enter a valid contact number (7 to 15 digits)'];
+const email = [/^\S+@\S+\.\S+$/, 'Enter a valid email address'];
+const req = (label) => [true, label + ' is required'];
+
+const schema = new mongoose.Schema({
+  studentId: { type: String, unique: true, trim: true },
+  firstName: { type: String, required: req('First name'), trim: true },
+  middleName: { type: String, trim: true },
+  lastName: { type: String, required: req('Last name'), trim: true },
+  gender: { type: String, enum: { values: ['Male', 'Female'], message: 'Gender must be Male or Female' }, required: req('Gender') },
+  dateOfBirth: {
+    type: Date, required: req('Date of birth'),
+    validate: { validator: (v) => v < new Date(), message: 'Date of birth must be in the past' }
+  },
+  address: { type: String, required: req('Address'), trim: true },
+  contactNumber: { type: String, required: req('Contact number'), match: phone },
+  email: { type: String, required: req('Email'), lowercase: true, trim: true, match: email },
+  guardianName: { type: String, required: req('Parent/Guardian name'), trim: true },
+  guardianContact: { type: String, required: req('Parent/Guardian contact'), match: phone },
+  gradeLevel: { type: String, required: req('Grade level') },
+  course: { type: mongoose.Schema.Types.ObjectId, ref: 'Course' },
+  section: { type: mongoose.Schema.Types.ObjectId, ref: 'Section' },
+  enrollmentStatus: { type: String, enum: ['Pending', 'Enrolled', 'Dropped', 'Graduated'], default: 'Pending' },
+  photo: String
+}, { timestamps: true, toJSON: { virtuals: true }, toObject: { virtuals: true } });
+
+schema.virtual('fullName').get(function () {
+  return [this.firstName, this.middleName, this.lastName].filter(Boolean).join(' ');
+});
+
+// Auto-create Student ID like 2026-0001 when the form leaves it empty
+schema.pre('validate', async function () {
+  if (this.studentId) return;
+  const year = new Date().getFullYear();
+  const last = await this.constructor.findOne({ studentId: new RegExp('^' + year + '-') }).sort('-studentId');
+  const next = last ? parseInt(last.studentId.split('-')[1], 10) + 1 : 1;
+  this.studentId = `${year}-${String(next).padStart(4, '0')}`;
+});
+
+module.exports = mongoose.model('Student', schema);
+````
+
+**Step 3 - add and commit:**
+
+```
+git add server/models/Student.js
+git commit -m "feat(server): add Student model with validation and auto student ID"
+```
+
+---
