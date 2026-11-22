@@ -1,0 +1,88 @@
+## Commit 8
+
+### `server/utils/crud.js`
+
+````js
+// A reusable helper that builds GET / POST / PUT / DELETE routes for any model.
+const express = require('express');
+const { requireRole } = require('../middleware/auth');
+
+const escapeRx = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+module.exports = (Model, opts = {}) => {
+  const { populate = '', searchFields = [], sort = '-createdAt', afterSave, prepare } = opts;
+  const withPopulate = (query) => (populate ? query.populate(populate) : query);
+  const router = express.Router();
+
+  // LIST (supports ?q=search and ?field=value filters)
+  router.get('/', async (req, res, next) => {
+    try {
+      const filter = {};
+      for (const key in req.query) {
+        if (key !== 'q' && Model.schema.paths[key] && req.query[key] !== '') filter[key] = req.query[key];
+      }
+      if (req.query.q && searchFields.length) {
+        const rx = new RegExp(escapeRx(String(req.query.q)), 'i');
+        filter.$or = searchFields.map((f) => ({ [f]: rx }));
+      }
+      res.json(await withPopulate(Model.find(filter)).sort(sort));
+    } catch (e) { next(e); }
+  });
+
+  // READ ONE
+  router.get('/:id', async (req, res, next) => {
+    try {
+      const doc = await withPopulate(Model.findById(req.params.id));
+      if (!doc) return res.status(404).json({ message: 'Record not found' });
+      res.json(doc);
+    } catch (e) { next(e); }
+  });
+
+  // CREATE
+  router.post('/', async (req, res, next) => {
+    try {
+      let body = { ...req.body };
+      if (prepare) body = prepare(body);
+      Object.keys(body).forEach((k) => (body[k] === '' || body[k] === null) && delete body[k]);
+      const doc = await Model.create(body);
+      if (afterSave) await afterSave(doc);
+      res.status(201).json(await withPopulate(Model.findById(doc._id)));
+    } catch (e) { next(e); }
+  });
+
+  // UPDATE
+  router.put('/:id', async (req, res, next) => {
+    try {
+      const doc = await Model.findById(req.params.id);
+      if (!doc) return res.status(404).json({ message: 'Record not found' });
+      let body = { ...req.body };
+      if (prepare) body = prepare(body);
+      for (const k in body) {
+        if (k === '_id' || k === '__v') continue;
+        doc.set(k, body[k] === '' ? undefined : body[k]);
+      }
+      await doc.save();
+      if (afterSave) await afterSave(doc);
+      res.json(await withPopulate(Model.findById(doc._id)));
+    } catch (e) { next(e); }
+  });
+
+  // DELETE (admin only)
+  router.delete('/:id', requireRole('admin'), async (req, res, next) => {
+    try {
+      const doc = await Model.findByIdAndDelete(req.params.id);
+      if (!doc) return res.status(404).json({ message: 'Record not found' });
+      res.json({ message: 'Deleted successfully' });
+    } catch (e) { next(e); }
+  });
+
+  return router;
+};
+````
+
+```
+git add server/utils/crud.js
+git commit -m "feat(server): add reusable CRUD route helper"
+```
+
+---
