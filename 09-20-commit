@@ -1,0 +1,1445 @@
+## Commit 9: `feat(server): add auth, users, course, section and subject routes`
+
+**What this adds:** Adds login and the current-user route, the admin-only user management route, and the course, section and subject routes that use the CRUD helper.
+
+**Step 1 - make the folders:**
+
+```
+mkdir server\routes
+```
+
+**Step 2 - create these files and paste the code:**
+
+
+### `server/routes/auth.js`
+
+````js
+const router = require('express').Router();
+const jwt = require('jsonwebtoken');
+const User = require('../models/User');
+const { protect } = require('../middleware/auth');
+
+router.post('/login', async (req, res, next) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) return res.status(400).json({ message: 'Email and password are required' });
+    const user = await User.findOne({ email: email.toLowerCase().trim() }).select('+password');
+    if (!user || !(await user.matchPassword(password)))
+      return res.status(401).json({ message: 'Incorrect email or password' });
+    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '1d' });
+    res.json({ token, user: { _id: user._id, name: user.name, email: user.email, role: user.role } });
+  } catch (e) { next(e); }
+});
+
+router.get('/me', protect, (req, res) => res.json(req.user));
+
+module.exports = router;
+````
+
+
+### `server/routes/users.js`
+
+````js
+const express = require('express');
+const crud = require('../utils/crud');
+const User = require('../models/User');
+
+const router = express.Router();
+// Admin cannot delete their own account by mistake
+router.delete('/:id', (req, res, next) => {
+  if (req.params.id === String(req.user._id)) return res.status(400).json({ message: 'You cannot delete your own account' });
+  next();
+});
+router.use(crud(User, {
+  searchFields: ['name', 'email'],
+  sort: 'name',
+  prepare: (body) => { if (!body.password) delete body.password; return body; } // blank password = keep old one
+}));
+module.exports = router;
+````
+
+
+### `server/routes/courses.js`
+
+````js
+const crud = require('../utils/crud');
+module.exports = crud(require('../models/Course'), { searchFields: ['name', 'code'], sort: 'name' });
+````
+
+
+### `server/routes/sections.js`
+
+````js
+const crud = require('../utils/crud');
+module.exports = crud(require('../models/Section'), { populate: 'course', searchFields: ['name', 'adviser'], sort: 'gradeLevel name' });
+````
+
+
+### `server/routes/subjects.js`
+
+````js
+const crud = require('../utils/crud');
+module.exports = crud(require('../models/Subject'), { populate: 'course', searchFields: ['name', 'code'], sort: 'code' });
+````
+
+**Step 3 - add and commit:**
+
+```
+git add server/routes/auth.js server/routes/users.js server/routes/courses.js server/routes/sections.js server/routes/subjects.js
+git commit -m "feat(server): add auth, users, course, section and subject routes"
+```
+
+---
+## Commit 10
+
+### `server/routes/students.js`
+
+````js
+const express = require('express');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+const Student = require('../models/Student');
+const { requireRole } = require('../middleware/auth');
+
+const router = express.Router();
+const uploadDir = path.join(__dirname, '..', 'uploads');
+
+// Photo upload settings: JPG/PNG/WEBP only, max 2MB
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (r, f, cb) => cb(null, uploadDir),
+    filename: (r, f, cb) => cb(null, Date.now() + '-' + Math.round(Math.random() * 1e6) + path.extname(f.originalname).toLowerCase())
+  }),
+  limits: { fileSize: 2 * 1024 * 1024 },
+  fileFilter: (r, f, cb) => {
+    if (/^image\/(jpeg|png|webp)$/.test(f.mimetype)) return cb(null, true);
+    const err = new Error('Only JPG, PNG or WEBP images are allowed'); err.status = 400; cb(err);
+  }
+});
+
+const removeFile = (p) => {
+  if (p && p.startsWith('/uploads/')) fs.unlink(path.join(uploadDir, path.basename(p)), () => {});
+};
+const populate = 'course section';
+
+router.get('/', async (req, res, next) => {
+  try {
+    const filter = {};
+    ['gradeLevel', 'course', 'section', 'enrollmentStatus', 'gender'].forEach((k) => { if (req.query[k]) filter[k] = req.query[k]; });
+    if (req.query.q) {
+      const rx = new RegExp(String(req.query.q).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      filter.$or = ['studentId', 'firstName', 'middleName', 'lastName'].map((f) => ({ [f]: rx }));
+    }
+    res.json(await Student.find(filter).populate(populate).sort('lastName firstName'));
+  } catch (e) { next(e); }
+});
+
+router.get('/:id', async (req, res, next) => {
+  try {
+    const s = await Student.findById(req.params.id).populate(populate);
+    if (!s) return res.status(404).json({ message: 'Student not found' });
+    res.json(s);
+  } catch (e) { next(e); }
+});
+
+router.post('/', upload.single('photo'), async (req, res, next) => {
+  try {
+    const body = { ...req.body };
+    Object.keys(body).forEach((k) => body[k] === '' && delete body[k]);
+    if (req.file) body.photo = '/uploads/' + req.file.filename;
+    const s = await Student.create(body);
+    res.status(201).json(await Student.findById(s._id).populate(populate));
+  } catch (e) {
+    if (req.file) removeFile('/uploads/' + req.file.filename); // do not keep photo if save failed
+    next(e);
+  }
+});
+
+router.put('/:id', upload.single('photo'), async (req, res, next) => {
+  try {
+    const s = await Student.findById(req.params.id);
+    if (!s) { if (req.file) removeFile('/uploads/' + req.file.filename); return res.status(404).json({ message: 'Student not found' }); }
+    for (const k in req.body) {
+      if (['_id', '__v', 'photo'].includes(k)) continue;
+      s.set(k, req.body[k] === '' ? undefined : req.body[k]);
+    }
+    const oldPhoto = s.photo;
+    if (req.file) s.photo = '/uploads/' + req.file.filename;
+    await s.save();
+    if (req.file) removeFile(oldPhoto);
+    res.json(await Student.findById(s._id).populate(populate));
+  } catch (e) {
+    if (req.file) removeFile('/uploads/' + req.file.filename);
+    next(e);
+  }
+});
+
+router.delete('/:id', requireRole('admin'), async (req, res, next) => {
+  try {
+    const s = await Student.findByIdAndDelete(req.params.id);
+    if (!s) return res.status(404).json({ message: 'Student not found' });
+    removeFile(s.photo);
+    // Also remove this student's enrollments and grades
+    await require('../models/Enrollment').deleteMany({ student: s._id });
+    await require('../models/Grade').deleteMany({ student: s._id });
+    res.json({ message: 'Student deleted' });
+  } catch (e) { next(e); }
+});
+
+module.exports = router;
+````
+
+```
+git add server/routes/students.js
+git commit -m "feat(server): add student routes with photo upload"
+```
+
+---
+
+## Commit 11
+
+### `server/routes/enrollments.js`
+
+````js
+const crud = require('../utils/crud');
+const Enrollment = require('../models/Enrollment');
+const Student = require('../models/Student');
+
+// After saving an enrollment, copy the newest enrollment info to the student record
+async function syncStudent(doc) {
+  const latest = await Enrollment.findOne({ student: doc.student }).sort({ schoolYear: -1, createdAt: -1 });
+  if (!latest || String(latest._id) !== String(doc._id)) return; // editing old history: leave student alone
+  const update = { enrollmentStatus: doc.status };
+  if (doc.course) update.course = doc.course;
+  if (doc.section) update.section = doc.section;
+  await Student.findByIdAndUpdate(doc.student, update);
+}
+
+module.exports = crud(Enrollment, { populate: 'student course section', afterSave: syncStudent });
+````
+
+### `server/routes/grades.js`
+
+````js
+const crud = require('../utils/crud');
+module.exports = crud(require('../models/Grade'), { populate: 'student subject' });
+````
+
+### `server/routes/dashboard.js`
+
+````js
+const router = require('express').Router();
+const Student = require('../models/Student');
+const Course = require('../models/Course');
+const Section = require('../models/Section');
+
+// All numbers are counted live from MongoDB (nothing is fake)
+router.get('/', async (req, res, next) => {
+  try {
+    const [total, male, female, enrolled, courses, sections, recent, byGrade, byStatus] = await Promise.all([
+      Student.countDocuments(),
+      Student.countDocuments({ gender: 'Male' }),
+      Student.countDocuments({ gender: 'Female' }),
+      Student.countDocuments({ enrollmentStatus: 'Enrolled' }),
+      Course.countDocuments(),
+      Section.countDocuments(),
+      Student.find().sort('-createdAt').limit(5).populate('course section'),
+      Student.aggregate([{ $group: { _id: '$gradeLevel', count: { $sum: 1 } } }, { $sort: { _id: 1 } }]),
+      Student.aggregate([{ $group: { _id: '$enrollmentStatus', count: { $sum: 1 } } }])
+    ]);
+    res.json({ total, male, female, enrolled, courses, sections, recent, byGrade, byStatus });
+  } catch (e) { next(e); }
+});
+
+module.exports = router;
+````
+
+```
+git add server/routes/enrollments.js server/routes/grades.js server/routes/dashboard.js
+git commit -m "feat(server): add enrollment, grade and dashboard routes"
+```
+
+---
+
+## Commit 12
+
+### `server/server.js`
+
+````js
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const path = require('path');
+const fs = require('fs');
+const connectDB = require('./config/db');
+const { protect, requireRole } = require('./middleware/auth');
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+fs.mkdirSync(path.join(__dirname, 'uploads'), { recursive: true });
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+app.use('/api/auth', require('./routes/auth'));
+app.use('/api/dashboard', protect, require('./routes/dashboard'));
+app.use('/api/students', protect, require('./routes/students'));
+app.use('/api/enrollments', protect, require('./routes/enrollments'));
+app.use('/api/courses', protect, require('./routes/courses'));
+app.use('/api/sections', protect, require('./routes/sections'));
+app.use('/api/subjects', protect, require('./routes/subjects'));
+app.use('/api/grades', protect, require('./routes/grades'));
+app.use('/api/users', protect, requireRole('admin'), require('./routes/users'));
+
+app.use((req, res) => res.status(404).json({ message: 'Route not found' }));
+
+// One place that turns any error into a helpful message
+app.use((err, req, res, next) => {
+  let status = err.status || 500;
+  let message = err.message || 'Server error';
+  if (err.name === 'ValidationError') { status = 400; message = Object.values(err.errors).map((e) => e.message).join('. '); }
+  else if (err.code === 11000) { status = 400; message = 'A record with the same ' + Object.keys(err.keyPattern || {}).join(', ') + ' already exists'; }
+  else if (err.name === 'CastError') { status = 400; message = 'Invalid value for ' + err.path; }
+  else if (err.name === 'MulterError') { status = 400; message = err.code === 'LIMIT_FILE_SIZE' ? 'Image must be 2MB or smaller' : err.message; }
+  else if (status === 500) console.error(err);
+  res.status(status).json({ message });
+});
+
+const PORT = process.env.PORT || 5000;
+connectDB().then(() => app.listen(PORT, () => console.log('Server running on http://localhost:' + PORT)));
+````
+
+### `server/seed.js`
+
+````js
+// Run with: npm run seed   (clears the database and adds sample data)
+require('dotenv').config();
+const mongoose = require('mongoose');
+const [User, Course, Section, Subject, Student, Enrollment, Grade] =
+  ['User', 'Course', 'Section', 'Subject', 'Student', 'Enrollment', 'Grade'].map((n) => require('./models/' + n));
+
+(async () => {
+  await mongoose.connect(process.env.MONGO_URI);
+  await Promise.all([User, Course, Section, Subject, Student, Enrollment, Grade].map((M) => M.deleteMany({})));
+
+  await User.create([
+    { name: 'System Admin', email: 'admin@school.com', password: 'admin123', role: 'admin' },
+    { name: 'Office Staff', email: 'staff@school.com', password: 'staff123', role: 'staff' }
+  ]);
+
+  const courses = await Course.create([
+    { code: 'STEM', name: 'Science, Technology, Engineering and Mathematics', description: 'Science and math track' },
+    { code: 'ABM', name: 'Accountancy, Business and Management', description: 'Business track' },
+    { code: 'HUMSS', name: 'Humanities and Social Sciences', description: 'Social sciences track' },
+    { code: 'ICT', name: 'Information and Communications Technology', description: 'Computer and technology track' }
+  ]);
+  const c = Object.fromEntries(courses.map((x) => [x.code, x]));
+
+  const sections = await Section.create([
+    { name: 'STEM-A', gradeLevel: 'Grade 11', course: c.STEM._id, adviser: 'Ms. Reyes' },
+    { name: 'ABM-A', gradeLevel: 'Grade 11', course: c.ABM._id, adviser: 'Mr. Garcia' },
+    { name: 'HUMSS-A', gradeLevel: 'Grade 11', course: c.HUMSS._id, adviser: 'Ms. Lim' },
+    { name: 'ICT-A', gradeLevel: 'Grade 12', course: c.ICT._id, adviser: 'Mr. Tan' },
+    { name: 'STEM-B', gradeLevel: 'Grade 12', course: c.STEM._id, adviser: 'Mrs. Cruz' }
+  ]);
+
+  const subjects = await Subject.create([
+    { code: 'ENG11', name: 'English for Academic Purposes', units: 3, course: c.STEM._id },
+    { code: 'MATH11', name: 'General Mathematics', units: 3, course: c.STEM._id },
+    { code: 'SCI11', name: 'Earth and Life Science', units: 3, course: c.STEM._id },
+    { code: 'FIL11', name: 'Komunikasyon at Pananaliksik', units: 3 },
+    { code: 'PE11', name: 'Physical Education', units: 2 },
+    { code: 'ICT11', name: 'Computer Programming', units: 3, course: c.ICT._id }
+  ]);
+
+  // [first, middle, last, gender, birthdate, section index, status]
+  const people = [
+    ['Juan', 'Santos', 'Dela Cruz', 'Male', '2008-03-14', 0, 'Enrolled'],
+    ['Maria', 'Lopez', 'Reyes', 'Female', '2008-07-22', 0, 'Enrolled'],
+    ['Jose', 'Ramos', 'Garcia', 'Male', '2008-01-09', 1, 'Enrolled'],
+    ['Ana', 'Bautista', 'Mendoza', 'Female', '2008-11-30', 1, 'Enrolled'],
+    ['Mark', 'Villanueva', 'Torres', 'Male', '2008-05-18', 2, 'Pending'],
+    ['Angela', 'Cruz', 'Flores', 'Female', '2008-09-05', 2, 'Enrolled'],
+    ['Paolo', 'Aquino', 'Navarro', 'Male', '2007-02-27', 3, 'Enrolled'],
+    ['Kristine', 'Mercado', 'Pascual', 'Female', '2007-06-12', 3, 'Enrolled'],
+    ['Daniel', 'Castro', 'Ortega', 'Male', '2007-12-03', 4, 'Enrolled'],
+    ['Sofia', 'Rivera', 'Domingo', 'Female', '2007-04-16', 4, 'Pending'],
+    ['Miguel', 'Santiago', 'Valdez', 'Male', '2007-08-21', 4, 'Dropped'],
+    ['Bianca', 'Gomez', 'Salazar', 'Female', '2007-10-08', 3, 'Enrolled']
+  ];
+  const addresses = ['Lahug, Cebu City', 'Mabolo, Cebu City', 'Banilad, Cebu City', 'Talamban, Cebu City'];
+
+  for (let i = 0; i < people.length; i++) {
+    const [first, middle, last, gender, dob, si, status] = people[i];
+    const sec = sections[si];
+    const s = await Student.create({
+      firstName: first, middleName: middle, lastName: last, gender, dateOfBirth: dob,
+      address: addresses[i % 4], contactNumber: '0917' + String(1000000 + i * 1357).slice(0, 7),
+      email: `${first}.${last}@mail.com`.toLowerCase().replace(/\s/g, ''),
+      guardianName: 'Mr./Mrs. ' + last, guardianContact: '0928' + String(2000000 + i * 911).slice(0, 7),
+      gradeLevel: sec.gradeLevel, course: sec.course, section: sec._id, enrollmentStatus: status
+    });
+    await Enrollment.create({ student: s._id, course: sec.course, section: sec._id, schoolYear: '2026-2027', semester: '1st Semester', status });
+    if (i < 4) await Enrollment.create({ student: s._id, course: sec.course, section: sec._id, schoolYear: '2025-2026', semester: '2nd Semester', status: 'Enrolled', remarks: 'Previous semester' });
+    if (status === 'Enrolled') {
+      for (const sub of subjects.slice(0, 4)) {
+        await Grade.create({ student: s._id, subject: sub._id, schoolYear: '2026-2027', semester: '1st Semester', grade: 72 + Math.floor(Math.random() * 27) });
+      }
+    }
+  }
+
+  console.log('Sample data added.\nAdmin: admin@school.com / admin123\nStaff: staff@school.com / staff123');
+  await mongoose.disconnect();
+})().catch((e) => { console.error(e); process.exit(1); });
+````
+
+```
+git add server/server.js server/seed.js
+git commit -m "feat(server): add server entry point, error handler and seed script"
+```
+
+---
+
+## Commit 13
+
+### `client/package.json`
+
+````json
+{
+  "name": "sims-client",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "axios": "^1.7.2",
+    "lucide-react": "^0.395.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.23.1",
+    "recharts": "^2.12.7"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "vite": "^5.3.1"
+  }
+}
+````
+
+### `client/vite.config.js`
+
+````js
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+
+// The proxy sends /api and /uploads requests to the backend on port 5000
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    port: 5173,
+    proxy: {
+      '/api': 'http://localhost:5000',
+      '/uploads': 'http://localhost:5000'
+    }
+  }
+});
+````
+
+### `client/index.html`
+
+````html
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Student Information Management System</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
+````
+
+### `client/.gitignore`
+
+````
+node_modules
+dist
+````
+
+```
+git add client/package.json client/vite.config.js client/index.html client/.gitignore
+git commit -m "chore(client): set up Vite, React and API proxy"
+```
+
+---
+
+## Commit 14
+
+### `client/src/api.js`
+
+````js
+import axios from 'axios';
+
+const api = axios.create({ baseURL: '/api' });
+
+// Attach the login token to every request
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem('token');
+  if (token) config.headers.Authorization = 'Bearer ' + token;
+  return config;
+});
+
+// If the token is no longer valid, go back to the login page
+api.interceptors.response.use((res) => res, (err) => {
+  if (err.response?.status === 401 && !err.config.url.includes('/auth/login')) {
+    localStorage.removeItem('token');
+    window.location.href = '/login';
+  }
+  return Promise.reject(err);
+});
+
+export const errMsg = (e) => e.response?.data?.message || 'Cannot connect to the server. Is the backend running?';
+export default api;
+````
+
+### `client/src/context.jsx`
+
+````jsx
+import { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import api from './api';
+
+const AuthCtx = createContext();
+const ToastCtx = createContext();
+export const useAuth = () => useContext(AuthCtx);
+export const useToast = () => useContext(ToastCtx); // returns notify(message, 'success' | 'error')
+
+export function AuthProvider({ children }) {
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!localStorage.getItem('token')) { setLoading(false); return; }
+    api.get('/auth/me')
+      .then((r) => setUser(r.data))
+      .catch(() => localStorage.removeItem('token'))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const login = async (email, password) => {
+    const { data } = await api.post('/auth/login', { email, password });
+    localStorage.setItem('token', data.token);
+    setUser(data.user);
+  };
+  const logout = () => { localStorage.removeItem('token'); setUser(null); };
+
+  return <AuthCtx.Provider value={{ user, loading, login, logout }}>{children}</AuthCtx.Provider>;
+}
+
+export function ToastProvider({ children }) {
+  const [items, setItems] = useState([]);
+  const notify = useCallback((message, type = 'success') => {
+    const id = Date.now() + Math.random();
+    setItems((list) => [...list, { id, message, type }]);
+    setTimeout(() => setItems((list) => list.filter((t) => t.id !== id)), 3500);
+  }, []);
+  return (
+    <ToastCtx.Provider value={notify}>
+      {children}
+      <div className="toasts">
+        {items.map((t) => <div key={t.id} className={'toast ' + t.type}>{t.message}</div>)}
+      </div>
+    </ToastCtx.Provider>
+  );
+}
+````
+
+```
+git add client/src/api.js client/src/context.jsx
+git commit -m "feat(client): add API client, auth context and notifications"
+```
+
+---
+
+## Commit 15
+
+### `client/src/components/Modal.jsx`
+
+````jsx
+import { X } from 'lucide-react';
+
+export function Modal({ title, onClose, children, wide }) {
+  return (
+    <div className="overlay" onMouseDown={onClose}>
+      <div className={'modal' + (wide ? ' wide' : '')} onMouseDown={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <h3>{title}</h3>
+          <button className="icon-btn" onClick={onClose} aria-label="Close"><X size={18} /></button>
+        </div>
+        <div className="modal-body">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+// Confirmation dialog used before deleting a record
+export function Confirm({ message, onYes, onNo }) {
+  return (
+    <Modal title="Please confirm" onClose={onNo}>
+      <p>{message}</p>
+      <div className="actions">
+        <button className="btn ghost" onClick={onNo}>Cancel</button>
+        <button className="btn danger" onClick={onYes}>Yes, delete</button>
+      </div>
+    </Modal>
+  );
+}
+````
+
+### `client/src/components/CrudPage.jsx`
+
+````jsx
+import { useEffect, useState, useCallback } from 'react';
+import { Plus, Pencil, Trash2, Eye, Search } from 'lucide-react';
+import api, { errMsg } from '../api';
+import { useAuth, useToast } from '../context.jsx';
+import { Modal, Confirm } from './Modal.jsx';
+
+const emailRx = /^\S+@\S+\.\S+$/;
+
+/*
+  One page component that gives us: table, search, filters, add/edit form
+  with validation, delete confirmation, and notifications.
+  Each page (Students, Courses...) only passes a configuration.
+*/
+export default function CrudPage({ title, endpoint, columns, fields, filters = [], searchable = true, View }) {
+  const { user } = useAuth();
+  const notify = useToast();
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [q, setQ] = useState('');
+  const [filterValues, setFilterValues] = useState({});
+  const [lists, setLists] = useState({});       // dropdown data loaded from other endpoints
+  const [editing, setEditing] = useState(null); // null = closed, {} = new, row = edit
+  const [form, setForm] = useState({});
+  const [errors, setErrors] = useState({});
+  const [saving, setSaving] = useState(false);
+  const [viewing, setViewing] = useState(null);
+  const [deleting, setDeleting] = useState(null);
+
+  // Load dropdown lists (example: list of courses for the course dropdown)
+  useEffect(() => {
+    [...fields, ...filters].filter((f) => f.from).forEach((f) => {
+      api.get(f.from).then((r) => setLists((l) => ({ ...l, [f.from]: r.data }))).catch(() => {});
+    });
+  }, []); // eslint-disable-line
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = { ...filterValues };
+      if (q) params.q = q;
+      const { data } = await api.get(endpoint, { params });
+      setRows(data);
+    } catch (e) { notify(errMsg(e), 'error'); }
+    setLoading(false);
+  }, [endpoint, q, filterValues, notify]);
+
+  useEffect(() => { const t = setTimeout(load, 250); return () => clearTimeout(t); }, [load]);
+
+  const optionsOf = (f) => f.options
+    ? f.options.map((o) => ({ value: o, label: o }))
+    : (lists[f.from] || []).map((o) => ({ value: o._id, label: f.optionLabel ? f.optionLabel(o) : o.name }));
+
+  const openForm = (row) => {
+    const init = {};
+    fields.forEach((f) => {
+      let v = row ? row[f.name] : undefined;
+      if (v && typeof v === 'object' && v._id) v = v._id;
+      if (f.type === 'date' && v) v = String(v).slice(0, 10);
+      if (f.type === 'file' || f.type === 'password') v = f.type === 'file' ? null : '';
+      init[f.name] = v ?? f.default ?? '';
+    });
+    setForm(init); setErrors({}); setEditing(row || {});
+  };
+
+  const validate = () => {
+    const e = {};
+    fields.forEach((f) => {
+      const v = form[f.name];
+      const empty = v === '' || v == null;
+      if (f.required && empty && !(f.type === 'password' && editing._id)) { e[f.name] = f.label + ' is required'; return; }
+      if (empty) return;
+      if (f.type === 'email' && !emailRx.test(v)) e[f.name] = 'Enter a valid email address';
+      if (f.type === 'number') {
+        const n = Number(v);
+        if (isNaN(n) || (f.min != null && n < f.min) || (f.max != null && n > f.max)) e[f.name] = `${f.label} must be a number from ${f.min} to ${f.max}`;
+      }
+      if (f.pattern && !f.pattern.test(v)) e[f.name] = f.patternMsg || 'Invalid format';
+      if (f.type === 'password' && v.length < 6) e[f.name] = 'Password must be at least 6 characters';
+      if (f.type === 'file' && v.size > 2 * 1024 * 1024) e[f.name] = 'Image must be 2MB or smaller';
+    });
+    setErrors(e);
+    return !Object.keys(e).length;
+  };
+
+  const submit = async (ev) => {
+    ev.preventDefault();
+    if (!validate()) return;
+    setSaving(true);
+    try {
+      let payload = { ...form };
+      if (fields.some((f) => f.type === 'file')) {        // forms with a photo are sent as FormData
+        payload = new FormData();
+        Object.entries(form).forEach(([k, v]) => {
+          if (v instanceof File) payload.append(k, v);
+          else if (v !== null && v !== undefined) payload.append(k, v);
+        });
+      }
+      if (editing._id) { await api.put(`${endpoint}/${editing._id}`, payload); notify('Changes saved'); }
+      else { await api.post(endpoint, payload); notify('Record added'); }
+      setEditing(null);
+      load();
+    } catch (e) { notify(errMsg(e), 'error'); }
+    setSaving(false);
+  };
+
+  const doDelete = async () => {
+    try { await api.delete(`${endpoint}/${deleting._id}`); notify('Record deleted'); load(); }
+    catch (e) { notify(errMsg(e), 'error'); }
+    setDeleting(null);
+  };
+
+  return (
+    <div>
+      <div className="page-head">
+        <h1>{title}</h1>
+        <button className="btn" onClick={() => openForm(null)}><Plus size={16} /> Add new</button>
+      </div>
+
+      <div className="card toolbar">
+        {searchable && (
+          <div className="search"><Search size={16} />
+            <input placeholder="Search..." value={q} onChange={(e) => setQ(e.target.value)} />
+          </div>
+        )}
+        {filters.map((f) => (
+          <select key={f.name} value={filterValues[f.name] || ''} onChange={(e) => setFilterValues({ ...filterValues, [f.name]: e.target.value })}>
+            <option value="">All {f.label}</option>
+            {optionsOf(f).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        ))}
+      </div>
+
+      <div className="card table-wrap">
+        <table>
+          <thead><tr>{columns.map((c) => <th key={c.label}>{c.label}</th>)}<th className="right">Actions</th></tr></thead>
+          <tbody>
+            {loading && <tr><td colSpan={columns.length + 1} className="empty">Loading...</td></tr>}
+            {!loading && !rows.length && <tr><td colSpan={columns.length + 1} className="empty">No records found. Click "Add new" to create one.</td></tr>}
+            {!loading && rows.map((r) => (
+              <tr key={r._id}>
+                {columns.map((c) => <td key={c.label}>{c.render ? c.render(r) : r[c.key]}</td>)}
+                <td className="right nowrap">
+                  {View && <button className="icon-btn" title="View" onClick={() => setViewing(r)}><Eye size={16} /></button>}
+                  <button className="icon-btn" title="Edit" onClick={() => openForm(r)}><Pencil size={16} /></button>
+                  {user.role === 'admin' && <button className="icon-btn red" title="Delete" onClick={() => setDeleting(r)}><Trash2 size={16} /></button>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {editing && (
+        <Modal title={(editing._id ? 'Edit ' : 'Add ') + title} onClose={() => setEditing(null)} wide>
+          <form onSubmit={submit} noValidate>
+            <div className="form-grid">
+              {fields.map((f) => (
+                <div key={f.name} className={'field' + (f.full ? ' full' : '')}>
+                  <label>{f.label}{f.required && <span className="req"> *</span>}</label>
+                  {f.type === 'select' ? (
+                    <select value={form[f.name]} onChange={(e) => setForm({ ...form, [f.name]: e.target.value })}>
+                      <option value="">-- Select --</option>
+                      {optionsOf(f).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                  ) : f.type === 'file' ? (
+                    <input type="file" accept="image/png,image/jpeg,image/webp" onChange={(e) => setForm({ ...form, [f.name]: e.target.files[0] || null })} />
+                  ) : (
+                    <input type={f.type || 'text'} value={form[f.name]} placeholder={f.type === 'password' && editing._id ? 'Leave blank to keep current' : f.placeholder}
+                      onChange={(e) => setForm({ ...form, [f.name]: e.target.value })} />
+                  )}
+                  {errors[f.name] && <small className="err">{errors[f.name]}</small>}
+                </div>
+              ))}
+            </div>
+            <div className="actions">
+              <button type="button" className="btn ghost" onClick={() => setEditing(null)}>Cancel</button>
+              <button className="btn" disabled={saving}>{saving ? 'Saving...' : 'Save'}</button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {viewing && View && <Modal title={title + ' details'} onClose={() => setViewing(null)} wide><View row={viewing} /></Modal>}
+      {deleting && <Confirm message="This record will be permanently deleted. Do you want to continue?" onYes={doDelete} onNo={() => setDeleting(null)} />}
+    </div>
+  );
+}
+````
+
+```
+git add client/src/components/Modal.jsx client/src/components/CrudPage.jsx
+git commit -m "feat(client): add Modal, delete confirmation and reusable CrudPage"
+```
+
+---
+
+## Commit 16
+
+### `client/src/components/Layout.jsx`
+
+````jsx
+import { useState } from 'react';
+import { NavLink, Outlet } from 'react-router-dom';
+import { LayoutDashboard, Users, ClipboardCheck, BookOpen, Layers, Library, Award, FileText, ShieldCheck, LogOut, Menu, GraduationCap } from 'lucide-react';
+import { useAuth } from '../context.jsx';
+
+export default function Layout() {
+  const { user, logout } = useAuth();
+  const [open, setOpen] = useState(false);
+  const links = [
+    ['/', 'Dashboard', LayoutDashboard],
+    ['/students', 'Students', Users],
+    ['/enrollments', 'Enrollments', ClipboardCheck],
+    ['/courses', 'Courses', BookOpen],
+    ['/sections', 'Sections', Layers],
+    ['/subjects', 'Subjects', Library],
+    ['/grades', 'Grades', Award],
+    ['/reports', 'Reports', FileText]
+  ];
+  if (user.role === 'admin') links.push(['/users', 'Users', ShieldCheck]);
+
+  return (
+    <div className="app">
+      <aside className={'sidebar' + (open ? ' open' : '')}>
+        <div className="brand"><GraduationCap size={26} /><span>SIMS</span></div>
+        <nav>
+          {links.map(([to, label, Icon]) => (
+            <NavLink key={to} to={to} end={to === '/'} onClick={() => setOpen(false)}>
+              <Icon size={18} /> {label}
+            </NavLink>
+          ))}
+        </nav>
+        <div className="userbox">
+          <div><strong>{user.name}</strong><small>{user.role}</small></div>
+          <button className="icon-btn light" onClick={logout} title="Log out"><LogOut size={18} /></button>
+        </div>
+      </aside>
+      {open && <div className="backdrop" onClick={() => setOpen(false)} />}
+      <div className="main">
+        <header className="topbar">
+          <button className="icon-btn" onClick={() => setOpen(true)} aria-label="Open menu"><Menu size={22} /></button>
+          <span>Student Information Management System</span>
+        </header>
+        <main className="content"><Outlet /></main>
+      </div>
+    </div>
+  );
+}
+````
+
+### `client/src/index.css`
+
+````css
+:root { --navy: #14275c; --navy-2: #1e3a8a; --blue: #3b82f6; --gray-50: #f4f6fa; --gray-100: #e9edf4; --gray-300: #cbd5e1; --gray-500: #64748b; --text: #1e293b; --red: #dc2626; --green: #16a34a; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: var(--gray-50); color: var(--text); font-size: 14.5px; }
+h1 { font-size: 1.5rem; margin: 0; color: var(--navy); } h3 { margin: 0 0 12px; color: var(--navy); } h4 { margin: 22px 0 8px; color: var(--navy); }
+.muted { color: var(--gray-500); } .small { font-size: 12.5px; } .center { padding: 80px; text-align: center; color: var(--gray-500); }
+.app { display: flex; min-height: 100vh; }
+.sidebar { width: 236px; background: var(--navy); color: #cfd8f0; display: flex; flex-direction: column; position: fixed; inset: 0 auto 0 0; z-index: 30; transition: transform .2s; }
+.brand { display: flex; align-items: center; gap: 10px; padding: 22px 20px; font-size: 1.25rem; font-weight: 700; color: #fff; }
+.sidebar nav { flex: 1; padding: 0 12px; overflow-y: auto; }
+.sidebar nav a { display: flex; align-items: center; gap: 12px; padding: 11px 14px; margin-bottom: 4px; border-radius: 10px; color: #cfd8f0; text-decoration: none; }
+.sidebar nav a:hover { background: rgba(255,255,255,.08); } .sidebar nav a.active { background: #fff; color: var(--navy); font-weight: 600; }
+.userbox { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 16px 20px; border-top: 1px solid rgba(255,255,255,.12); }
+.userbox small { display: block; color: #9fb0da; text-transform: capitalize; }
+.main { flex: 1; margin-left: 236px; min-width: 0; }
+.topbar { display: none; align-items: center; gap: 12px; padding: 12px 16px; background: #fff; border-bottom: 1px solid var(--gray-100); font-weight: 600; color: var(--navy); }
+.content { padding: 28px; max-width: 1280px; }
+.backdrop { position: fixed; inset: 0; background: rgba(15,23,42,.45); z-index: 20; }
+.page-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; gap: 12px; }
+.card { background: #fff; border-radius: 14px; box-shadow: 0 1px 3px rgba(20,39,92,.08); margin-bottom: 18px; }
+.pad { padding: 20px; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 10px; padding: 14px; align-items: center; }
+.search { display: flex; align-items: center; gap: 8px; border: 1px solid var(--gray-300); border-radius: 10px; padding: 0 12px; flex: 1; min-width: 180px; background: #fff; color: var(--gray-500); }
+.search input { border: 0; outline: 0; padding: 10px 0; width: 100%; font: inherit; }
+input, select { font: inherit; padding: 10px 12px; border: 1px solid var(--gray-300); border-radius: 10px; background: #fff; color: var(--text); width: 100%; }
+.toolbar > select, .toolbar > input { width: auto; }
+input:focus, select:focus, button:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; background: var(--navy-2); color: #fff; border: 0; padding: 10px 18px; border-radius: 10px; font: inherit; font-weight: 600; cursor: pointer; }
+.btn:hover { background: var(--navy); } .btn:disabled { opacity: .6; cursor: wait; } .btn.block { width: 100%; padding: 12px; }
+.btn.ghost { background: var(--gray-100); color: var(--navy); } .btn.danger { background: var(--red); }
+.icon-btn { background: transparent; border: 0; padding: 7px; border-radius: 8px; cursor: pointer; color: var(--gray-500); display: inline-flex; }
+.icon-btn:hover { background: var(--gray-100); color: var(--navy); } .icon-btn.red:hover { color: var(--red); } .icon-btn.light { color: #cfd8f0; } .icon-btn.light:hover { background: rgba(255,255,255,.12); color: #fff; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; font-size: 12.5px; color: var(--gray-500); font-weight: 600; padding: 12px 14px; background: #f8fafc; border-bottom: 1px solid var(--gray-100); white-space: nowrap; }
+td { padding: 11px 14px; border-bottom: 1px solid var(--gray-100); vertical-align: middle; }
+tbody tr:hover { background: #f8fafc; } .right { text-align: right; } .nowrap { white-space: nowrap; }
+.empty { text-align: center; color: var(--gray-500); padding: 28px; }
+.badge { padding: 3px 10px; border-radius: 99px; font-size: 12px; font-weight: 600; background: var(--gray-100); color: var(--navy); }
+.badge.Enrolled { background: #dcfce7; color: #166534; } .badge.Pending { background: #fef3c7; color: #92400e; }
+.badge.Dropped { background: #fee2e2; color: #991b1b; } .badge.Graduated { background: #dbeafe; color: #1e40af; } .badge.role-admin { background: #e0e7ff; color: #3730a3; }
+.avatar { border-radius: 50%; object-fit: cover; flex: none; } .avatar.ph { display: inline-flex; align-items: center; justify-content: center; background: var(--navy-2); color: #fff; font-weight: 600; font-size: 13px; }
+.person, .recent { display: flex; align-items: center; gap: 12px; } .recent { padding: 9px 0; border-bottom: 1px solid var(--gray-100); } .recent .badge { margin-left: auto; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px; margin-bottom: 18px; } .stats .card { margin: 0; }
+.stat { display: flex; align-items: center; gap: 14px; padding: 18px; } .stat-icon { width: 42px; height: 42px; border-radius: 12px; background: #e0e8ff; color: var(--navy-2); display: flex; align-items: center; justify-content: center; }
+.stat-value { font-size: 1.6rem; font-weight: 700; color: var(--navy); line-height: 1.1; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; } .chart { height: 250px; }
+.overlay { position: fixed; inset: 0; background: rgba(15,23,42,.5); display: flex; align-items: flex-start; justify-content: center; padding: 40px 16px; overflow-y: auto; z-index: 50; }
+.modal { background: #fff; border-radius: 16px; width: 100%; max-width: 440px; box-shadow: 0 20px 50px rgba(0,0,0,.25); } .modal.wide { max-width: 760px; }
+.modal-head { display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid var(--gray-100); } .modal-head h3 { margin: 0; }
+.modal-body { padding: 20px; }
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; } .field { display: flex; flex-direction: column; gap: 5px; } .field.full { grid-column: 1 / -1; }
+label { font-weight: 600; font-size: 13px; color: var(--navy); } .req { color: var(--red); } .err { color: var(--red); }
+.actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+.profile-head { display: flex; align-items: center; gap: 16px; margin-bottom: 16px; } .profile-head h2 { margin: 0 0 6px; color: var(--navy); }
+.info-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+.toasts { position: fixed; top: 16px; right: 16px; z-index: 100; display: flex; flex-direction: column; gap: 8px; }
+.toast { padding: 12px 18px; border-radius: 10px; color: #fff; box-shadow: 0 6px 20px rgba(0,0,0,.2); max-width: 340px; } .toast.success { background: var(--green); } .toast.error { background: var(--red); }
+.tab { border: 0; background: var(--gray-100); color: var(--navy); padding: 9px 16px; border-radius: 10px; font: inherit; font-weight: 600; cursor: pointer; } .tab.active { background: var(--navy-2); color: #fff; }
+.login-page { min-height: 100vh; display: flex; align-items: center; justify-content: center; background: linear-gradient(160deg, var(--navy) 0 45%, var(--gray-50) 45%); padding: 16px; }
+.login-card { background: #fff; width: 100%; max-width: 400px; padding: 32px; border-radius: 18px; box-shadow: 0 20px 50px rgba(20,39,92,.25); display: flex; flex-direction: column; gap: 14px; }
+.login-card h1 { font-size: 1.3rem; } .login-card p { margin: -8px 0 4px; } .login-logo { width: 56px; height: 56px; border-radius: 16px; background: var(--navy-2); color: #fff; display: flex; align-items: center; justify-content: center; }
+.alert { background: #fee2e2; color: #991b1b; padding: 10px 14px; border-radius: 10px; }
+@media (max-width: 900px) {
+  .sidebar { transform: translateX(-100%); } .sidebar.open { transform: none; } .main { margin-left: 0; } .topbar { display: flex; }
+  .content { padding: 16px; } .grid-2 { grid-template-columns: 1fr; } .info-grid { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 560px) { .form-grid { grid-template-columns: 1fr; } .page-head { flex-wrap: wrap; } }
+@media print {
+  .sidebar, .topbar, .no-print, .toasts { display: none !important; } .main { margin: 0; } .content { padding: 0; max-width: none; }
+  body { background: #fff; } .card { box-shadow: none; } .report { padding: 0; }
+}
+````
+
+```
+git add client/src/components/Layout.jsx client/src/index.css
+git commit -m "feat(client): add sidebar layout and navy theme"
+```
+
+---
+
+## Commit 17
+
+### `client/src/pages/Login.jsx`
+
+````jsx
+import { useState } from 'react';
+import { Navigate, useNavigate } from 'react-router-dom';
+import { GraduationCap } from 'lucide-react';
+import { useAuth } from '../context.jsx';
+import { errMsg } from '../api';
+
+export default function Login() {
+  const { user, login } = useAuth();
+  const navigate = useNavigate();
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  if (user) return <Navigate to="/" replace />;
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!/^\S+@\S+\.\S+$/.test(email)) return setError('Enter a valid email address');
+    if (!password) return setError('Password is required');
+    setError(''); setBusy(true);
+    try { await login(email, password); navigate('/'); }
+    catch (err) { setError(errMsg(err)); }
+    setBusy(false);
+  };
+
+  return (
+    <div className="login-page">
+      <form className="login-card" onSubmit={submit} noValidate>
+        <div className="login-logo"><GraduationCap size={32} /></div>
+        <h1>Student Information Management System</h1>
+        <p className="muted">Log in to manage student records</p>
+        {error && <div className="alert">{error}</div>}
+        <div className="field"><label>Email</label>
+          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="admin@school.com" autoFocus /></div>
+        <div className="field"><label>Password</label>
+          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Your password" /></div>
+        <button className="btn block" disabled={busy}>{busy ? 'Logging in...' : 'Log in'}</button>
+      </form>
+    </div>
+  );
+}
+````
+
+```
+git add client/src/pages/Login.jsx
+git commit -m "feat(client): add login page with validation"
+```
+
+---
+
+## Commit 18
+
+### `client/src/pages/Students.jsx`
+
+````jsx
+import { useEffect, useState } from 'react';
+import CrudPage from '../components/CrudPage.jsx';
+import api from '../api';
+
+export const GRADES = ['Grade 7', 'Grade 8', 'Grade 9', 'Grade 10', 'Grade 11', 'Grade 12'];
+export const STATUS = ['Pending', 'Enrolled', 'Dropped', 'Graduated'];
+export const fullName = (s) => [s.firstName, s.middleName, s.lastName].filter(Boolean).join(' ');
+const fmt = (d) => (d ? new Date(d).toLocaleDateString() : '-');
+const phoneRx = /^[0-9+\-\s()]{7,15}$/;
+
+export function Avatar({ s, size = 38 }) {
+  const style = { width: size, height: size };
+  return s.photo
+    ? <img className="avatar" style={style} src={s.photo} alt="" />
+    : <span className="avatar ph" style={style}>{(s.firstName?.[0] || '') + (s.lastName?.[0] || '')}</span>;
+}
+
+// Shown when the "eye" button is clicked: profile + enrollment history + grades
+function StudentView({ row }) {
+  const [grades, setGrades] = useState([]);
+  const [enrollments, setEnrollments] = useState([]);
+  useEffect(() => {
+    api.get('/grades', { params: { student: row._id } }).then((r) => setGrades(r.data));
+    api.get('/enrollments', { params: { student: row._id } }).then((r) => setEnrollments(r.data));
+  }, [row._id]);
+  const avg = grades.length ? (grades.reduce((a, g) => a + g.grade, 0) / grades.length).toFixed(2) : 'N/A';
+  const info = [
+    ['Student ID', row.studentId], ['Gender', row.gender], ['Date of birth', fmt(row.dateOfBirth)],
+    ['Address', row.address], ['Contact', row.contactNumber], ['Email', row.email],
+    ['Parent/Guardian', row.guardianName], ['Guardian contact', row.guardianContact],
+    ['Grade level', row.gradeLevel], ['Course', row.course?.name || '-'], ['Section', row.section?.name || '-'], ['Status', row.enrollmentStatus]
+  ];
+  return (
+    <div>
+      <div className="profile-head"><Avatar s={row} size={72} /><div><h2>{fullName(row)}</h2><span className={'badge ' + row.enrollmentStatus}>{row.enrollmentStatus}</span></div></div>
+      <div className="info-grid">{info.map(([k, v]) => <div key={k}><small className="muted">{k}</small><div>{v}</div></div>)}</div>
+
+      <h4>Enrollment history</h4>
+      <table><thead><tr><th>School year</th><th>Semester</th><th>Section</th><th>Status</th></tr></thead>
+        <tbody>{enrollments.length ? enrollments.map((e) => (
+          <tr key={e._id}><td>{e.schoolYear}</td><td>{e.semester}</td><td>{e.section?.name || '-'}</td><td>{e.status}</td></tr>
+        )) : <tr><td colSpan="4" className="empty">No enrollment records</td></tr>}</tbody></table>
+
+      <h4>Academic records (average: {avg})</h4>
+      <table><thead><tr><th>Subject</th><th>School year</th><th>Semester</th><th>Grade</th><th>Remarks</th></tr></thead>
+        <tbody>{grades.length ? grades.map((g) => (
+          <tr key={g._id}><td>{g.subject?.name}</td><td>{g.schoolYear}</td><td>{g.semester}</td><td>{g.grade}</td><td>{g.remarks}</td></tr>
+        )) : <tr><td colSpan="5" className="empty">No grades recorded</td></tr>}</tbody></table>
+    </div>
+  );
+}
+
+export default function Students() {
+  return (
+    <CrudPage
+      title="Students" endpoint="/students" View={StudentView}
+      columns={[
+        { label: 'Student', render: (s) => <div className="person"><Avatar s={s} /><div><strong>{fullName(s)}</strong><div className="muted small">{s.studentId}</div></div></div> },
+        { label: 'Gender', key: 'gender' },
+        { label: 'Grade level', key: 'gradeLevel' },
+        { label: 'Course', render: (s) => s.course?.code || '-' },
+        { label: 'Section', render: (s) => s.section?.name || '-' },
+        { label: 'Contact', key: 'contactNumber' },
+        { label: 'Status', render: (s) => <span className={'badge ' + s.enrollmentStatus}>{s.enrollmentStatus}</span> }
+      ]}
+      filters={[
+        { name: 'gradeLevel', label: 'grade levels', options: GRADES },
+        { name: 'course', label: 'courses', from: '/courses', optionLabel: (c) => c.code },
+        { name: 'section', label: 'sections', from: '/sections', optionLabel: (s) => `${s.name} (${s.gradeLevel})` },
+        { name: 'enrollmentStatus', label: 'statuses', options: STATUS }
+      ]}
+      fields={[
+        { name: 'studentId', label: 'Student ID', placeholder: 'Leave blank to auto-generate' },
+        { name: 'firstName', label: 'First name', required: true },
+        { name: 'middleName', label: 'Middle name' },
+        { name: 'lastName', label: 'Last name', required: true },
+        { name: 'gender', label: 'Gender', type: 'select', options: ['Male', 'Female'], required: true },
+        { name: 'dateOfBirth', label: 'Date of birth', type: 'date', required: true },
+        { name: 'address', label: 'Address', required: true, full: true },
+        { name: 'contactNumber', label: 'Contact number', required: true, pattern: phoneRx, patternMsg: 'Enter a valid contact number (7 to 15 digits)' },
+        { name: 'email', label: 'Email address', type: 'email', required: true },
+        { name: 'guardianName', label: 'Parent/Guardian name', required: true },
+        { name: 'guardianContact', label: 'Parent/Guardian contact', required: true, pattern: phoneRx, patternMsg: 'Enter a valid contact number (7 to 15 digits)' },
+        { name: 'gradeLevel', label: 'Grade level', type: 'select', options: GRADES, required: true },
+        { name: 'course', label: 'Course', type: 'select', from: '/courses', optionLabel: (c) => `${c.code} - ${c.name}` },
+        { name: 'section', label: 'Section', type: 'select', from: '/sections', optionLabel: (s) => `${s.name} (${s.gradeLevel})` },
+        { name: 'enrollmentStatus', label: 'Enrollment status', type: 'select', options: STATUS, default: 'Pending' },
+        { name: 'photo', label: 'Profile picture (JPG/PNG, max 2MB)', type: 'file', full: true }
+      ]}
+    />
+  );
+}
+````
+
+### `client/src/pages/SimplePages.jsx`
+
+````jsx
+import CrudPage from '../components/CrudPage.jsx';
+import { GRADES, STATUS, fullName } from './Students.jsx';
+
+const SEMESTERS = ['1st Semester', '2nd Semester', 'Summer'];
+const yearRx = /^\d{4}-\d{4}$/;
+const studentLabel = (s) => `${s.studentId} - ${fullName(s)}`;
+
+export const Courses = () => (
+  <CrudPage title="Courses" endpoint="/courses"
+    columns={[{ label: 'Code', key: 'code' }, { label: 'Name', key: 'name' }, { label: 'Description', key: 'description' }]}
+    fields={[
+      { name: 'code', label: 'Course code', required: true },
+      { name: 'name', label: 'Course name', required: true },
+      { name: 'description', label: 'Description', full: true }
+    ]} />
+);
+
+export const Sections = () => (
+  <CrudPage title="Sections" endpoint="/sections"
+    columns={[{ label: 'Section', key: 'name' }, { label: 'Grade level', key: 'gradeLevel' }, { label: 'Course', render: (s) => s.course?.code || '-' }, { label: 'Adviser', key: 'adviser' }]}
+    fields={[
+      { name: 'name', label: 'Section name', required: true },
+      { name: 'gradeLevel', label: 'Grade level', type: 'select', options: GRADES, required: true },
+      { name: 'course', label: 'Course', type: 'select', from: '/courses', optionLabel: (c) => `${c.code} - ${c.name}` },
+      { name: 'adviser', label: 'Adviser' }
+    ]} />
+);
+
+export const Subjects = () => (
+  <CrudPage title="Subjects" endpoint="/subjects"
+    columns={[{ label: 'Code', key: 'code' }, { label: 'Name', key: 'name' }, { label: 'Units', key: 'units' }, { label: 'Course', render: (s) => s.course?.code || 'All' }]}
+    fields={[
+      { name: 'code', label: 'Subject code', required: true },
+      { name: 'name', label: 'Subject name', required: true },
+      { name: 'units', label: 'Units', type: 'number', min: 1, max: 6, default: 1, required: true },
+      { name: 'course', label: 'Course', type: 'select', from: '/courses', optionLabel: (c) => `${c.code} - ${c.name}` }
+    ]} />
+);
+
+export const Enrollments = () => (
+  <CrudPage title="Enrollments" endpoint="/enrollments" searchable={false}
+    columns={[
+      { label: 'Student', render: (e) => (e.student ? studentLabel(e.student) : '-') },
+      { label: 'School year', key: 'schoolYear' }, { label: 'Semester', key: 'semester' },
+      { label: 'Course', render: (e) => e.course?.code || '-' }, { label: 'Section', render: (e) => e.section?.name || '-' },
+      { label: 'Status', render: (e) => <span className={'badge ' + e.status}>{e.status}</span> }
+    ]}
+    filters={[{ name: 'status', label: 'statuses', options: STATUS }, { name: 'semester', label: 'semesters', options: SEMESTERS }]}
+    fields={[
+      { name: 'student', label: 'Student', type: 'select', from: '/students', optionLabel: studentLabel, required: true, full: true },
+      { name: 'schoolYear', label: 'School year', placeholder: '2026-2027', required: true, pattern: yearRx, patternMsg: 'School year must look like 2026-2027' },
+      { name: 'semester', label: 'Semester', type: 'select', options: SEMESTERS, required: true },
+      { name: 'course', label: 'Course', type: 'select', from: '/courses', optionLabel: (c) => `${c.code} - ${c.name}` },
+      { name: 'section', label: 'Section', type: 'select', from: '/sections', optionLabel: (s) => `${s.name} (${s.gradeLevel})` },
+      { name: 'status', label: 'Status', type: 'select', options: STATUS, default: 'Enrolled', required: true },
+      { name: 'remarks', label: 'Remarks' }
+    ]} />
+);
+
+export const Grades = () => (
+  <CrudPage title="Grades" endpoint="/grades" searchable={false}
+    columns={[
+      { label: 'Student', render: (g) => (g.student ? studentLabel(g.student) : '-') },
+      { label: 'Subject', render: (g) => g.subject?.name || '-' },
+      { label: 'School year', key: 'schoolYear' }, { label: 'Semester', key: 'semester' },
+      { label: 'Grade', key: 'grade' },
+      { label: 'Remarks', render: (g) => <span className={'badge ' + (g.remarks === 'Passed' ? 'Enrolled' : 'Dropped')}>{g.remarks}</span> }
+    ]}
+    filters={[{ name: 'student', label: 'students', from: '/students', optionLabel: studentLabel }, { name: 'semester', label: 'semesters', options: SEMESTERS }]}
+    fields={[
+      { name: 'student', label: 'Student', type: 'select', from: '/students', optionLabel: studentLabel, required: true, full: true },
+      { name: 'subject', label: 'Subject', type: 'select', from: '/subjects', optionLabel: (s) => `${s.code} - ${s.name}`, required: true, full: true },
+      { name: 'schoolYear', label: 'School year', placeholder: '2026-2027', required: true, pattern: yearRx, patternMsg: 'School year must look like 2026-2027' },
+      { name: 'semester', label: 'Semester', type: 'select', options: SEMESTERS, required: true },
+      { name: 'grade', label: 'Grade (0 to 100)', type: 'number', min: 0, max: 100, required: true }
+    ]} />
+);
+
+export const Users = () => (
+  <CrudPage title="Users" endpoint="/users"
+    columns={[{ label: 'Name', key: 'name' }, { label: 'Email', key: 'email' }, { label: 'Role', render: (u) => <span className={'badge role-' + u.role}>{u.role}</span> }]}
+    fields={[
+      { name: 'name', label: 'Full name', required: true },
+      { name: 'email', label: 'Email', type: 'email', required: true },
+      { name: 'password', label: 'Password', type: 'password', required: true },
+      { name: 'role', label: 'Role', type: 'select', options: ['admin', 'staff'], default: 'staff', required: true }
+    ]} />
+);
+````
+
+```
+git add client/src/pages/Students.jsx client/src/pages/SimplePages.jsx
+git commit -m "feat(client): add students, enrollment, course, section, subject, grade and user pages"
+```
+
+---
+
+## Commit 19
+
+### `client/src/pages/Dashboard.jsx`
+
+````jsx
+import { useEffect, useState } from 'react';
+import { Users, User, UserCheck, BookOpen, Layers } from 'lucide-react';
+import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, PieChart, Pie, Cell, Legend } from 'recharts';
+import api, { errMsg } from '../api';
+import { useToast } from '../context.jsx';
+import { Avatar, fullName } from './Students.jsx';
+
+const COLORS = ['#1e3a8a', '#60a5fa', '#94a3b8', '#cbd5e1'];
+
+export default function Dashboard() {
+  const [d, setD] = useState(null);
+  const notify = useToast();
+  useEffect(() => { api.get('/dashboard').then((r) => setD(r.data)).catch((e) => notify(errMsg(e), 'error')); }, [notify]);
+  if (!d) return <div className="center">Loading dashboard...</div>;
+
+  const cards = [
+    ['Total students', d.total, Users], ['Male', d.male, User], ['Female', d.female, User],
+    ['Enrolled', d.enrolled, UserCheck], ['Courses', d.courses, BookOpen], ['Sections', d.sections, Layers]
+  ];
+  const gradeData = d.byGrade.map((x) => ({ name: x._id, Students: x.count }));
+  const genderData = [{ name: 'Male', value: d.male }, { name: 'Female', value: d.female }];
+  const statusData = d.byStatus.map((x) => ({ name: x._id, value: x.count }));
+
+  return (
+    <div>
+      <div className="page-head"><h1>Dashboard</h1></div>
+      <div className="stats">
+        {cards.map(([label, value, Icon]) => (
+          <div className="card stat" key={label}>
+            <div className="stat-icon"><Icon size={20} /></div>
+            <div><div className="stat-value">{value}</div><div className="muted">{label}</div></div>
+          </div>
+        ))}
+      </div>
+
+      <div className="grid-2">
+        <div className="card pad">
+          <h3>Students per grade level</h3>
+          <div className="chart">
+            <ResponsiveContainer>
+              <BarChart data={gradeData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                <XAxis dataKey="name" fontSize={12} /><YAxis allowDecimals={false} fontSize={12} />
+                <Tooltip /><Bar dataKey="Students" fill="#1e3a8a" radius={[6, 6, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+        <div className="card pad">
+          <h3>Gender</h3>
+          <div className="chart">
+            <ResponsiveContainer>
+              <PieChart>
+                <Pie data={genderData} dataKey="value" nameKey="name" innerRadius={50} outerRadius={80}>
+                  {genderData.map((_, i) => <Cell key={i} fill={COLORS[i]} />)}
+                </Pie>
+                <Tooltip /><Legend />
+              </PieChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid-2">
+        <div className="card pad">
+          <h3>Enrollment status</h3>
+          <div className="chart">
+            <ResponsiveContainer>
+              <PieChart>
+                <Pie data={statusData} dataKey="value" nameKey="name" outerRadius={80}>
+                  {statusData.map((_, i) => <Cell key={i} fill={COLORS[i % 4]} />)}
+                </Pie>
+                <Tooltip /><Legend />
+              </PieChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+        <div className="card pad">
+          <h3>Recent registrations</h3>
+          {!d.recent.length && <p className="muted">No students yet.</p>}
+          {d.recent.map((s) => (
+            <div className="recent" key={s._id}>
+              <Avatar s={s} />
+              <div><strong>{fullName(s)}</strong><div className="muted small">{s.studentId} - {s.gradeLevel}</div></div>
+              <span className={'badge ' + s.enrollmentStatus}>{s.enrollmentStatus}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+````
+
+### `client/src/pages/Reports.jsx`
+
+````jsx
+import { useEffect, useState } from 'react';
+import { Printer } from 'lucide-react';
+import api, { errMsg } from '../api';
+import { useToast } from '../context.jsx';
+import { GRADES, STATUS, fullName } from './Students.jsx';
+
+const TABS = [['students', 'Student list'], ['enrollments', 'Enrollment report'], ['academic', 'Academic report']];
+
+export default function Reports() {
+  const notify = useToast();
+  const [tab, setTab] = useState('students');
+  const [filter, setFilter] = useState('');
+  const [rows, setRows] = useState([]);
+
+  useEffect(() => { setFilter(''); }, [tab]);
+  useEffect(() => {
+    const endpoint = { students: '/students', enrollments: '/enrollments', academic: '/grades' }[tab];
+    const key = { students: 'gradeLevel', enrollments: 'status', academic: 'schoolYear' }[tab];
+    const params = filter ? { [key]: filter } : {};
+    api.get(endpoint, { params }).then((r) => setRows(r.data)).catch((e) => notify(errMsg(e), 'error'));
+  }, [tab, filter, notify]);
+
+  // Academic summary: average grade per student
+  const summary = Object.values(rows.reduce((acc, g) => {
+    if (!g.student) return acc;
+    const k = g.student._id;
+    acc[k] = acc[k] || { student: g.student, count: 0, sum: 0 };
+    acc[k].count += 1; acc[k].sum += g.grade;
+    return acc;
+  }, {}));
+
+  return (
+    <div>
+      <div className="page-head no-print"><h1>Reports</h1>
+        <button className="btn" onClick={() => window.print()}><Printer size={16} /> Print report</button></div>
+
+      <div className="card toolbar no-print">
+        {TABS.map(([k, label]) => <button key={k} className={'tab' + (tab === k ? ' active' : '')} onClick={() => setTab(k)}>{label}</button>)}
+        {tab === 'students' && <select value={filter} onChange={(e) => setFilter(e.target.value)}><option value="">All grade levels</option>{GRADES.map((g) => <option key={g}>{g}</option>)}</select>}
+        {tab === 'enrollments' && <select value={filter} onChange={(e) => setFilter(e.target.value)}><option value="">All statuses</option>{STATUS.map((g) => <option key={g}>{g}</option>)}</select>}
+        {tab === 'academic' && <input placeholder="School year e.g. 2026-2027" value={filter} onChange={(e) => setFilter(e.target.value)} />}
+      </div>
+
+      <div className="card pad report">
+        <h2>{TABS.find((t) => t[0] === tab)[1]}</h2>
+        <p className="muted">Generated on {new Date().toLocaleString()} - {rows.length} record(s)</p>
+
+        {tab === 'students' && <table><thead><tr><th>Student ID</th><th>Name</th><th>Gender</th><th>Grade level</th><th>Course</th><th>Section</th><th>Status</th></tr></thead>
+          <tbody>{rows.map((s) => <tr key={s._id}><td>{s.studentId}</td><td>{fullName(s)}</td><td>{s.gender}</td><td>{s.gradeLevel}</td><td>{s.course?.code || '-'}</td><td>{s.section?.name || '-'}</td><td>{s.enrollmentStatus}</td></tr>)}</tbody></table>}
+
+        {tab === 'enrollments' && <table><thead><tr><th>Student</th><th>School year</th><th>Semester</th><th>Course</th><th>Section</th><th>Status</th></tr></thead>
+          <tbody>{rows.map((e) => <tr key={e._id}><td>{e.student ? `${e.student.studentId} - ${fullName(e.student)}` : '-'}</td><td>{e.schoolYear}</td><td>{e.semester}</td><td>{e.course?.code || '-'}</td><td>{e.section?.name || '-'}</td><td>{e.status}</td></tr>)}</tbody></table>}
+
+        {tab === 'academic' && (<>
+          <h4>Average grade per student</h4>
+          <table><thead><tr><th>Student ID</th><th>Name</th><th>Subjects</th><th>Average</th><th>Remarks</th></tr></thead>
+            <tbody>{summary.map((s) => { const avg = s.sum / s.count; return (
+              <tr key={s.student._id}><td>{s.student.studentId}</td><td>{fullName(s.student)}</td><td>{s.count}</td><td>{avg.toFixed(2)}</td><td>{avg >= 75 ? 'Passed' : 'Failed'}</td></tr>); })}</tbody></table>
+          <h4>All grades</h4>
+          <table><thead><tr><th>Student</th><th>Subject</th><th>School year</th><th>Semester</th><th>Grade</th><th>Remarks</th></tr></thead>
+            <tbody>{rows.map((g) => <tr key={g._id}><td>{g.student ? fullName(g.student) : '-'}</td><td>{g.subject?.name}</td><td>{g.schoolYear}</td><td>{g.semester}</td><td>{g.grade}</td><td>{g.remarks}</td></tr>)}</tbody></table>
+        </>)}
+        {!rows.length && <p className="empty">No records found for this report.</p>}
+      </div>
+    </div>
+  );
+}
+````
+
+```
+git add client/src/pages/Dashboard.jsx client/src/pages/Reports.jsx
+git commit -m "feat(client): add dashboard charts and printable reports"
+```
+
+---
+
+## Commit 20
+
+### `client/src/App.jsx`
+
+````jsx
+import { Routes, Route, Navigate } from 'react-router-dom';
+import { useAuth } from './context.jsx';
+import Layout from './components/Layout.jsx';
+import Login from './pages/Login.jsx';
+import Dashboard from './pages/Dashboard.jsx';
+import Students from './pages/Students.jsx';
+import Reports from './pages/Reports.jsx';
+import { Enrollments, Courses, Sections, Subjects, Grades, Users } from './pages/SimplePages.jsx';
+
+// Protected: only logged-in users can see these pages
+function Protected({ adminOnly, children }) {
+  const { user, loading } = useAuth();
+  if (loading) return <div className="center">Loading...</div>;
+  if (!user) return <Navigate to="/login" replace />;
+  if (adminOnly && user.role !== 'admin') return <Navigate to="/" replace />;
+  return children;
+}
+
+export default function App() {
+  return (
+    <Routes>
+      <Route path="/login" element={<Login />} />
+      <Route element={<Protected><Layout /></Protected>}>
+        <Route index element={<Dashboard />} />
+        <Route path="students" element={<Students />} />
+        <Route path="enrollments" element={<Enrollments />} />
+        <Route path="courses" element={<Courses />} />
+        <Route path="sections" element={<Sections />} />
+        <Route path="subjects" element={<Subjects />} />
+        <Route path="grades" element={<Grades />} />
+        <Route path="reports" element={<Reports />} />
+        <Route path="users" element={<Protected adminOnly><Users /></Protected>} />
+      </Route>
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
+  );
+}
+````
+
+### `client/src/main.jsx`
+
+````jsx
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import { BrowserRouter } from 'react-router-dom';
+import App from './App.jsx';
+import { AuthProvider, ToastProvider } from './context.jsx';
+import './index.css';
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <BrowserRouter>
+    <ToastProvider>
+      <AuthProvider>
+        <App />
+      </AuthProvider>
+    </ToastProvider>
+  </BrowserRouter>
+);
+````
+
+```
+git add client/src/App.jsx client/src/main.jsx
+git commit -m "feat(client): add protected routes and app entry"
+```
+
+---
